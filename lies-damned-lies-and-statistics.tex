@@ -1,0 +1,634 @@
+\documentclass{beamer}
+
+\usepackage[utf8]{inputenc}
+\usepackage{fancyvrb}
+\usepackage{color}
+
+\include{pygments}
+
+\usetheme{CambridgeUS}
+\usecolortheme{rose}
+
+\useoutertheme{infolines}
+\setbeamertemplate{blocks}[default]
+\setbeamertemplate{items}[triangle]
+\setbeamertemplate{enumerate items}[square]
+\setbeamertemplate{sections/subsections in toc}[square]
+
+\AtBeginSubsection[]
+{
+  \begin{frame}{Outline}
+    \tableofcontents[sectionstyle=show/shaded,subsectionstyle=show/shaded/hide]
+  \end{frame}
+}
+
+\title{Lies, damned lies, and statistics}
+\subtitle{A journey into the PostgreSQL statistics subsystem}
+\author[Jan Urbański]{Jan Urbański \\ \texttt{j.urbanski@wulczer.org}}
+\institute{New Relic}
+\date[PGCon 2017]{PGCon 2017, Ottawa, May 25}
+
+\begin{document}
+
+\frame{\titlepage}
+
+\begin{frame}
+  \frametitle{For those following at home}
+
+  \begin{block}{Getting the slides}
+    \begin{center}
+      https://wulczer.org/lies-damned-lies-and-statistics.pdf
+    \end{center}
+  \end{block}
+
+  \begin{block}{Getting the source}
+    \begin{center}
+      https://github.com/wulczer/lies-damned-lies-and-statistics
+    \end{center}
+  \end{block}
+\end{frame}
+
+\begin{frame}
+  \tableofcontents
+\end{frame}
+
+\section{Overview of the statistics subsystem}
+\subsection{Why gather statistics?}
+
+\begin{frame}
+  \frametitle{Lifecycle of a SQL query}
+  \setbeamercovered{transparent=30}
+
+  \begin{itemize}
+  \item<1> parsing
+    \begin{itemize}
+    \item \alert<1>{transforming SQL text} into an internal structure
+    \item determining types of all expressions
+    \end{itemize}
+  \item<1-2> \alert<2>{planning}
+    \begin{itemize}
+    \item \alert<2>{deciding \alert<1>{how to execute} the query}
+    \end{itemize}
+  \item<1> execution
+    \begin{itemize}
+    \item \alert<1>{reading actual data} from disk
+    \item formatting and returning the result
+    \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{The challenges of executing SQL}
+
+  \begin{itemize}
+  \item SQL is a \alert{declarative} language
+  \item the planner decides between \alert{different ways} of executing the query
+  \item the statistics subsystem provides the \alert{inputs} to this process
+  \item mistakes in planning can be \alert{very costly}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{The importance of cardinality estimation}
+
+  \begin{itemize}
+    \item one of the basic questions the planner has to answer is \alert{how much rows will an expression return}
+  \item estimating the cardinality important for several reasons
+    \begin{itemize}
+    \item choosing join \alert{type} and join \alert{ordering} (nested loop, hash join)
+    \item choosing \alert{table access} method (sequential scan, index scan)
+    \item deciding whether to \alert{materialise} or not
+    \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Selectivity estimation}
+  \begin{itemize}
+  \item estimating cardinality boils down to two things
+    \begin{itemize}
+    \item figuring out the \alert{total number of rows} in a table
+    \item figuring out \alert{how many rows} will be \alert{filtered out} by the WHERE clause
+    \end{itemize}
+  \item tracking the size of a table is relatively \alert{straightforward}
+  \item determining the \alert{selectivity} of a WHERE clause is \alert{much more difficult}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}[label=puzzlers]
+  \frametitle<1>{Selectivity estimation puzzlers}
+
+  \begin{block}{Estimation problem examples}
+    \include{estimation-problems}
+  \end{block}
+\end{frame}
+
+\begin{frame}[label=puzzlers-2]
+  \frametitle<1>{Selectivity estimation puzzlers cont.}
+
+  \begin{block}{Estimation problem examples cont.}
+    \include{estimation-problems-2}
+  \end{block}
+\end{frame}
+
+\subsection{Information tracked}
+
+\begin{frame}
+  \frametitle{Overall table statistics}
+
+  \begin{itemize}
+  \item number of \alert{rows} in the table
+    \begin{itemize}
+    \item useful when deciding which join method to use
+    \item processing each row has a cost, so a precise count is necessary
+    \end{itemize}
+  \item number of \alert{disk pages} used by the table
+    \begin{itemize}
+    \item the real measure of how much will it cost to \alert{read data off disk}
+    \end{itemize}
+  \item the same stats are kept for every \alert{index}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Per-column stats}
+
+  \begin{itemize}
+  \item fraction of values that are \alert{\texttt{NULL}}
+  \item average value \alert{width in bytes}
+    \begin{itemize}
+    \item includes TOASTed value width if applicable
+    \end{itemize}
+  \item number of \alert{distinct values} in the column
+    \begin{itemize}
+    \item if \alert{positive} it's the actual number of distinct values
+    \item if \alert{negative} it's the number of distinct values as a fraction of all
+      non-null values
+    \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Per-column stats cont.}
+
+  \begin{itemize}
+  \item an array of \alert{most common} values
+  \item an array of \alert{frequencies} of the most common values
+    \begin{itemize}
+    \item same length as the values array
+    \end{itemize}
+  \item \alert{histogram bounds} for the spectrum of values in the column
+    \begin{itemize}
+    \item only present if the column type can be \alert{ordered}
+    \item excludes most common values
+    \end{itemize}
+  \item \alert{correlation} between physical row ordering and logical ordering
+    \begin{itemize}
+    \item used to determine how much random IO will an index scan require
+    \item only present if the column type can be \alert{ordered}
+    \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Special cases}
+
+  \begin{itemize}
+  \item some \alert{special data types} maintain their own statistic data
+    \begin{itemize}
+    \item statistic calculation is \alert{pluggable}
+    \item the storage format is \alert{flexible} enough to work for different data types
+    \item more on that later
+    \end{itemize}
+  \item \alert{foreign tables} can provide their own statistic calculation implementations
+  \item the same statistics are gathered for \alert{expression indexes}
+    \begin{itemize}
+    \item regular indexes don't need their own per-column statistics
+    \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\subsection{Exploring the data}
+
+\begin{frame}
+  \frametitle{pg\_class}
+
+  \begin{itemize}
+  \item keeps \alert{table-wide} statistics
+    \begin{itemize}
+    \item \texttt{relpages} is the number of \alert{disk pages} used by the table
+    \item \texttt{reltuples} is the approximate number of \alert{rows} in the table
+    \end{itemize}
+  \item row count information is \alert{approximate}, but can still useful for monitoring
+  \item also has an entry for \alert{every index}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{pg\_statistics}
+
+  \begin{itemize}
+  \item keeps \alert{per-column} statistics
+  \item information that's not \alert{datatype-dependent} is stored directly
+    \begin{itemize}
+    \item \texttt{stanullfrac} is the \texttt{NULL} fraction
+    \item \texttt{stawidth} is the average width
+    \item \texttt{stadistinct} is the number of distinct values
+    \end{itemize}
+  \item the remainder are five \alert{loosely typed} ``slots''
+  \item each slot is formed out of \alert{four fields}
+    \begin{itemize}
+    \item \alert{code} identifying what kind data the slot contains
+    \item optional \alert{operator OID}
+    \item \texttt{anyarray} for \alert{column values}
+    \item \texttt{real} array for \alert{statistical data}
+    \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{pg\_stats}
+
+  \begin{itemize}
+  \item a more \alert{user-friendly} view built on top of \texttt{pg\_statistics}
+  \item \alert{table names} instead of OIDs
+  \item slightly better \alert{column names} (\texttt{null\_frac} vs \texttt{stanullfrac})
+  \item ``slots'' codes \alert{decoded} to their meanings
+  \item \alert{readable for everyone} and limited to columns accessible to the user
+  \end{itemize}
+\end{frame}
+
+\againframe<2>{puzzlers}
+\againframe<2>{puzzlers-2}
+
+\section{The mechanics}
+\subsection{Populating statistics tables}
+
+\begin{frame}
+  \frametitle{ANALYZE and VACUUM}
+
+  \begin{itemize}
+  \item \alert{ANALYZE} is the primary command that updates statistics
+    \begin{itemize}
+    \item a plain ANALYZE updates statistics for \alert{all tables} in the cluster
+    \item it just loops over all tables in pg\_class so we'll focus on a
+      \alert{single-table} ANALYZE
+    \item it's also possible to analyze a \alert{specific set of columns} only
+    \end{itemize}
+  \item both \alert{VACUUM} and \alert{ANALYZE} update the \texttt{pg\_class}
+    per-table statistics
+  \item things like \alert{CLUSTER} and \alert{CREATE INDEX} also update
+    \texttt{pg\_class}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{ANALYZE internals}
+
+  \begin{itemize}
+  \item switch to the \alert{table owner's} user
+    \begin{itemize}
+    \item index functions will get evaluated
+    \item at least \alert{three CVEs} out of that one...
+    \end{itemize}
+  \item find out the \alert{ordering operators} and \alert{custom type
+    analysis} functions for the column
+  \item determine the \alert{number of rows} that need to be fetched
+  \item fetch \alert{sample rows} from the table
+    \begin{itemize}
+    \item the number of rows is the \alert{maximum} over all columns
+    \end{itemize}
+  \item \alert{calculate} statistics
+  \item \alert{update} \texttt{pg\_statistics}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Automated statistics collection}
+
+  \begin{itemize}
+  \item the \alert{autovacuum worker} will run ANALYZE if needed
+    \begin{itemize}
+    \item decision taken based on the number of \alert{rows changed} since last
+      ANALYZE
+    \item trigger expressed as a \alert{fraction} of the total number of rows,
+      with an additional \alert{minimum} floor
+    \item the \texttt{pg\_class} data comes in handy here...
+    \end{itemize}
+  \item after \alert{bulk loading} a new table, it will initially have no
+    statistic information
+    \begin{itemize}
+    \item remember to \alert{run ANALYZE} as part of the bulk load
+    \end{itemize}
+  \item no autovacuum = \alert{no stats}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Statistics collector vs planner statistics}
+
+  \begin{itemize}
+  \item confusingly, there is a Postgres process called the \alert{stats
+    collector}
+  \item it handles \alert{runtime} stats which are \textbf{different} from the
+    \alert{planner} stats
+  \item examples of runtime stats are:
+    \begin{itemize}
+    \item number of times a table has been \alert{accessed}
+    \item number of \alert{rows read} from an index
+    \item number of \alert{buffer hits} for data in a table
+    \end{itemize}
+  \item runtime stats live in \texttt{pg\_stat\_*} tables
+  \end{itemize}
+\end{frame}
+
+\subsection{Into the math}
+
+\begin{frame}
+  \frametitle{Determining row sample size}
+
+  \begin{itemize}
+  \item the number of rows to acquire from the table is based on \alert{target
+    histogram size}
+  \item histograms are stored as \alert{sets of values} that divide the column data
+    into \alert{equal-sized bins}
+  \item \alert{relative bin size error} is the relative size difference between
+    an actual bin and an equal-sized bin
+  \item \alert{error probability} is the probability that the \alert{relative
+    bin size} error will be \alert{greater than expected}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Histogram bin size error}
+
+  \begin{block}{Histogram bin size error example}
+    \begin{align*}
+    \text{assuming \alert{values}}\ V &= \{1, 2, 3, \dots, 1000\}\\
+    \text{and \alert{histogram size}}\ k &= 4\\
+    \text{equal-sized bins}\ B_{equal} &= \{1, 250, 500, 750, 1000\}\\
+    \text{actual bins}\ B_{actual} &= \{1, 300, 550, 780, 1000\}\\
+    \text{\alert{max relative bin size error}}\ f &= \frac{|300 - 250|}{250} = 0.2
+    \end{align*}
+  \end{block}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Histogram minimum sample size}
+
+  \begin{block}{Bounding max relative bin size error}
+    Given a table with \alert<2>{$n$ rows}, the required sample size for a
+    histogram size $k$, maximum relative bin size $f$ and error probability
+    $\gamma$ is
+    \begin{align*}
+      r = \frac{4k\alert<2>{\ln{\frac{2n}{\gamma}}}}{f^{2}}
+    \end{align*}
+    Postgres assumes $f = 0.5$, $n = 10^{6}$ and $\gamma = 0.01$, which yields
+    \begin{align*}
+      r = 305.82 k
+    \end{align*}
+  \end{block}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Histogram minimum sample size cont.}
+
+  \begin{itemize}
+  \item for histogram size $k$ you need to fetch \alert{300 times} as much rows
+  \item that factor depends on the size of the table, but \alert{logarithmically}
+    \begin{itemize}
+    \item even if the table is much larger, a factor of 300 should still be enough
+    \end{itemize}
+  \item the default histogram size is 100
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Sampling table blocks}
+
+  \begin{itemize}
+  \item once we know how many rows we need, that many \alert{table blocks} are
+    fetched
+  \item table blocks are sampled using \alert{Knuth's algorithm S}
+  \end{itemize}
+
+  \begin{block}{Sampling a table with N blocks to obtain n blocks}
+    \hspace*{2em}let $K$ be the number of remaining blocks\\
+    \hspace*{2em}let $k$ be $n$ minus current sample size\\
+    \hspace*{2em}skip current block it with a probability of $1 - \frac{k}{K}$\\
+    \hspace*{2em}otherwise put it in the sample
+  \end{block}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Sampling rows}
+
+  \begin{itemize}
+  \item as table \alert{blocks} are fetched, \alert{rows} contained in them are
+    being sampled
+  \item can't use algorithm S because the \alert{total number} of rows is not
+    known
+  \item \alert{Vitter's algorithm Z} is used, which is a variation of reservoir
+    sampling that requires less random numbers to be generated
+  \end{itemize}
+
+  \begin{block}{Naive reservoir sampling to obtain n rows}
+      \hspace*{2em}put the first $n$ rows in the sample\\
+      \hspace*{2em}for each next row number $i$ keep it with probability $\frac{n}{i}$\\
+      \hspace*{2em}if block is kept, have it replace a random one from the sample
+  \end{block}
+\end{frame}
+
+\begin{frame}
+  \frametitle{calculating statistics}
+
+  \begin{itemize}
+  \item most statistics are \alert{straightforward} to compute
+    \begin{itemize}
+    \item fraction of non-null values
+    \item histogram
+    \item most common values and their frequencies
+    \item correlation
+    \end{itemize}
+  \item the number of \alert{distinct values} is a bit more involved
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Estimating number of distinct values}
+
+  \begin{itemize}
+  \item if all values in the sample are different, assume the column is \alert{unique}
+  \item if all values appear more than once, assume the column contains
+    \alert{only these values}
+  \item otherwise, use the \alert{Haas and Stokes estimator}
+  \end{itemize}
+
+  \begin{block}{Number of distinct values}
+    \begin{center}
+      $\frac{n d}{n - f_1 + \frac{f_1 n}{N}}$
+    \end{center}
+    Where $n$ is the sample size, $N$ is the total number of values, $f_1$ is
+    the number of distinct values that appeared exactly once and d is the total
+    number of distinct values.
+  \end{block}
+\end{frame}
+
+\subsection{Configuration}
+
+\begin{frame}
+  \frametitle{Configuring the statistics subsystem}
+
+  \begin{itemize}
+  \item \texttt{default\_statistics\_target} is the \alert{histogram width}
+    \begin{itemize}
+    \item configurable on a per-column basis
+    \end{itemize}
+  \item \texttt{autovacuum\_analyze\_threshold} is the minimum \alert{number of
+    row updates} before autovacuum runs ANALYZE
+  \item \texttt{autovacuum\_analyze\_scale\_factor} is the \alert{fraction of
+    table size} to change before autovacuum runs ANALYZE
+    \begin{itemize}
+    \item configurable on a per-table basis
+    \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\section{Advanced features}
+\subsection{Typanalyze functions}
+
+\begin{frame}
+  \frametitle{Array type statistics}
+
+  \begin{itemize}
+  \item certain \alert{data types} have their own statistics routines
+  \item a typical example are \alert{arrays}
+    \begin{itemize}
+    \item histograms and most common elements \alert{don't make sense} for
+      arrays
+    \item array columns are more often constrained with \alert{set operators}
+      and \alert{ANY/ALL} than with equality
+    \end{itemize}
+  \item the type analysis function calculates \alert{most common elements} (as
+    opposed to \alert{most common values})
+  \item additionally, a \alert{distinct element counts histogram} is calculated
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Tsvector statistics}
+
+  \begin{itemize}
+  \item similar to \alert{array statistics}
+  \item tsvectors only store \alert{unique occurrences} of lexems, so no distinct
+    elements count histogram
+  \item also accounts for the fact that the \alert{frequency of words} in a
+    natural language text is not linear
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Range statistics}
+
+  \begin{itemize}
+  \item stores \alert{three} additional histograms
+  \item the first one is a \alert{length histogram} of all the non-empty ranges
+    \begin{itemize}
+    \item the format is similar to a values histogram for scalar types
+    \item the ``measurements'' slot contains the fraction of empty ranges
+    \end{itemize}
+  \item the second one is a \alert{bounds histogram}, which are actually two
+    histograms
+    \begin{itemize}
+    \item uses ranges instead of integers for histogram values
+    \item the \alert{lower bounds} form a histogram of \alert{lower bounds} for
+      all the ranges and the \alert{upper bounds} form a histogram of
+      \alert{upper bounds}
+    \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\subsection{Multivariate statistics}
+
+\begin{frame}
+\begin{beamercolorbox}[center]{note}
+  \Huge Coming in 10.0
+\end{beamercolorbox}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Correlated columns example}
+
+  \begin{block}{Overestimating selectivity}
+    \include{estimation-problems-multivariate}
+  \end{block}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Correlated columns}
+
+  \begin{itemize}
+  \item a \alert{functional dependency} between columns is when a value in one
+    \alert{determines} the value in the other
+    \begin{itemize}
+    \item for example, a store in zip code YOA will \alert{always} be in Yukon
+    \end{itemize}
+  \item if the planner is not aware of them, it will \alert{overestimate} the
+    selectivity of a two-clause WHERE constraint
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Correlated columns cont.}
+
+  \begin{itemize}
+  \item functional dependencies are rarely \alert{``hard''} because of bad
+    data, special cases and so on
+  \item a functional dependency statistic will store how
+    \alert{``strong''} the dependency is
+  \item functional dependencies know nothing about \alert{individual values}
+    \begin{itemize}
+    \item only works if \texttt{WHERE} are \alert{consistent} with the dependency
+    \item \texttt{zip = 'L5M' AND province = 'yukon'} will give \alert{wrong}
+      estimates
+    \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{n-distinct statistics}
+
+  \begin{itemize}
+  \item a similar problem to \texttt{WHERE} selectivity for correlated columns
+    is estimating \alert{distinct values}
+  \item if the planner is not aware, if will \alert{overestimate} the number of rows a \texttt{GROUP BY} will produce
+  \item an \alert{ndistinct} statistic will store distinct counts for the
+    user-defined \alert{column groupings}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Multivariate n-distinct example}
+
+  \begin{block}{Overestimating row counts}
+    \include{estimation-problems-n-distinct}
+  \end{block}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Creating extended statistics}
+
+  \begin{block}{Creating extended statistics}
+    \include{create-extended-statistics}
+  \end{block}
+\end{frame}
+
+\subsection*{Questions}
+
+\begin{frame}
+\begin{beamercolorbox}[center]{note}
+  \Huge Questions?
+\end{beamercolorbox}
+\end{frame}
+
+\end{document}
