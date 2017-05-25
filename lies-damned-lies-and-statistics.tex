@@ -78,17 +78,6 @@
 \end{frame}
 
 \begin{frame}
-  \frametitle{The challenges of executing SQL}
-
-  \begin{itemize}
-  \item SQL is a \alert{declarative} language
-  \item the planner decides between \alert{different ways} of executing the query
-  \item the statistics subsystem provides the \alert{inputs} to this process
-  \item mistakes in planning can be \alert{very costly}
-  \end{itemize}
-\end{frame}
-
-\begin{frame}
   \frametitle{The importance of cardinality estimation}
 
   \begin{itemize}
@@ -131,7 +120,7 @@
   \end{block}
 \end{frame}
 
-\subsection{Information tracked}
+\subsection{What gets calculated}
 
 \begin{frame}
   \frametitle{Overall table statistics}
@@ -208,7 +197,7 @@
   \end{itemize}
 \end{frame}
 
-\subsection{Exploring the data}
+\subsection{Accessing statistics}
 
 \begin{frame}
   \frametitle{pg\_class}
@@ -261,7 +250,7 @@
 \againframe<2>{puzzlers}
 \againframe<2>{puzzlers-2}
 
-\section{The mechanics}
+\section{The internals}
 \subsection{Populating statistics tables}
 
 \begin{frame}
@@ -353,9 +342,9 @@
   \item histograms are stored as \alert{sets of values} that divide the column data
     into \alert{equal-sized bins}
   \item \alert{relative bin size error} is the relative size difference between
-    an actual bin and an equal-sized bin
+    the histogram bin and a perfectly equal-sized bin
   \item \alert{error probability} is the probability that the \alert{relative
-    bin size} error will be \alert{greater than expected}
+    bin size error} will be \alert{greater than our target error}
   \end{itemize}
 \end{frame}
 
@@ -434,13 +423,13 @@
 
   \begin{block}{Naive reservoir sampling to obtain n rows}
       \hspace*{2em}put the first $n$ rows in the sample\\
-      \hspace*{2em}for each next row number $i$ keep it with probability $\frac{n}{i}$\\
-      \hspace*{2em}if block is kept, have it replace a random one from the sample
+      \hspace*{2em}for each next row number $i$ choose it with probability $\frac{n}{i}$\\
+      \hspace*{2em}if block is chosen, have it replace a random one from the sample
   \end{block}
 \end{frame}
 
 \begin{frame}
-  \frametitle{calculating statistics}
+  \frametitle{Calculating statistics}
 
   \begin{itemize}
   \item most statistics are \alert{straightforward} to compute
